@@ -38,12 +38,27 @@ jobs:
         build-mode: ${{ matrix.build-mode }}
         # To run the deepest security scans, uncomment the line below:
         # queries: security-extended,security-and-quality
+        
+    - name: Install Kernel Headers
+      if: matrix.build-mode == 'manual'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y linux-headers-$(uname -r)
 
     # This step runs AFTER initialization so CodeQL can watch the compilation
     - name: Run manual build steps
       if: matrix.build-mode == 'manual'
       shell: bash
       run: |
+        echo "=== COMPILING ST7789 DISPLAY DRIVER ==="
+        # We navigate into the folder and run make. 
+        # The '|| true' ensures that if it fails due to Raspberry Pi specific 
+        # architecture differences, it doesn't crash the whole scan.
+        cd st7789_module && make || true
+        
+        echo "=== COMPILING I2S MIC DRIVER ==="
+        cd i2s_mic_module && make || true
+        
         echo "=== FINDING C FILES ==="
         find . -name "*.c"
         
