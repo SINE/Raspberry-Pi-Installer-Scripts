@@ -44,10 +44,12 @@ jobs:
       if: matrix.build-mode == 'manual'
       shell: bash
       run: |
-        echo "Manually compiling C files for CodeQL..."
-        # This attempts to compile all .c files it can find so CodeQL can watch.
-        # The "|| true" ensures the workflow doesn't crash if a file fails to compile.
-        find . -name "*.c" -exec gcc -c {} \; || true
+        echo "=== FINDING C FILES ==="
+        find . -name "*.c"
+        
+        echo "=== ATTEMPTING TO COMPILE ==="
+        # Removing '|| true' so we can see the exact compilation errors
+        find . -name "*.c" -exec gcc -c {} \;
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
