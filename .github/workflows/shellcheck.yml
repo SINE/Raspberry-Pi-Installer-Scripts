@@ -1,0 +1,21 @@
+name: "ShellCheck Security Scan"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  shellcheck:
+    name: Scan Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Run ShellCheck
+      run: |
+        echo "Scanning all .sh files for vulnerabilities and bad practices..."
+        # Find all shell scripts and run shellcheck on them
+        find . -type f -name "*.sh" -exec shellcheck --severity=warning {} +
