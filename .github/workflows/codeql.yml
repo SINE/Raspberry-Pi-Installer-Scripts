@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
         - language: c-cpp
-          build-mode: manual # <-- CHANGED FROM 'autobuild' TO 'manual'
+          build-mode: manual
         - language: python
           build-mode: none
 
