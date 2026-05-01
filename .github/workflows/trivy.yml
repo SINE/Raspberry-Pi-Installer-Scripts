@@ -14,6 +14,11 @@ jobs:
   trivy-scan:
     name: Trivy Filesystem Scan
     runs-on: ubuntu-latest
+    # ADDED: Required permissions to upload SARIF results to GitHub Security tab
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
 
     steps:
       - name: Checkout repository
@@ -27,9 +32,9 @@ jobs:
           scan-ref: '.'
           
           # MAXIMUM DEPTH CONFIGURATION:
-          # Enable vulnerabilities, misconfigurations, and malware. 
+          # FIXED: Removed the invalid 'malware' scanner. 
           # We explicitly omit 'secret' here.
-          scanners: 'vuln,misconfig,malware'
+          scanners: 'vuln,misconfig'
           
           # Catch everything, from CRITICAL down to UNKNOWN
           severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
@@ -42,7 +47,8 @@ jobs:
           output: 'trivy-results.sarif'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        # FIXED: Upgraded to v4 due to upcoming deprecation
+        uses: github/codeql-action/upload-sarif@v4
         if: always() # Ensure results are uploaded even if Trivy finds issues
         with:
           sarif_file: 'trivy-results.sarif'
