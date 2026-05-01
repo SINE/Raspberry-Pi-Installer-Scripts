@@ -1,0 +1,48 @@
+name: Trivy Maximum Depth Security Scan
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  # A daily schedule ensures you catch new CVEs added to the Trivy database
+  schedule:
+    - cron: '0 2 * * *' # Runs every day at 2:00 AM UTC
+  workflow_dispatch:
+
+jobs:
+  trivy-scan:
+    name: Trivy Filesystem Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        # Using the official Aqua Security Trivy action
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          
+          # MAXIMUM DEPTH CONFIGURATION:
+          # Enable vulnerabilities, misconfigurations, and malware. 
+          # We explicitly omit 'secret' here.
+          scanners: 'vuln,misconfig,malware'
+          
+          # Catch everything, from CRITICAL down to UNKNOWN
+          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
+          
+          # Show vulnerabilities even if a fix is not yet available
+          ignore-unfixed: false
+          
+          # Output in SARIF format so GitHub can natively display the results
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() # Ensure results are uploaded even if Trivy finds issues
+        with:
+          sarif_file: 'trivy-results.sarif'
