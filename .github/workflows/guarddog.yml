@@ -1,0 +1,82 @@
+name: GuardDog Supply Chain Security
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  guarddog-scan:
+    name: Scan All Python Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install GuardDog
+        run: pip install guarddog
+
+      - name: Find and Scan Dependency Files
+        id: scan
+        run: |
+          echo "Searching for Python dependency files..."
+          
+          # Find all common Python dependency files, excluding virtual environments or hidden dirs
+          FILES=$(find . -type f \( -name "requirements.txt" -o -name "setup.py" -o -name "pyproject.toml" \) -not -path "*/\.*" -not -path "*/venv/*")
+          
+          if [ -z "$FILES" ]; then
+            echo "No Python dependency files found."
+            exit 0
+          fi
+          
+          # Initialize tracking variables
+          OVERALL_EXIT_CODE=0
+          FAILED_FILES=""
+          PASSED_FILES=""
+          
+          # Loop through EVERY file found
+          for FILE in $FILES; do
+            echo "=================================================="
+            echo "🔍 Scanning: $FILE"
+            echo "=================================================="
+            
+            # Run guarddog verify on the current file
+            if guarddog pypi verify "$FILE"; then
+              echo "✅ Passed: $FILE"
+              PASSED_FILES="$PASSED_FILES\n- $FILE"
+            else
+              echo "❌ Failed: $FILE"
+              FAILED_FILES="$FAILED_FILES\n- $FILE"
+              OVERALL_EXIT_CODE=1
+            fi
+            echo ""
+          done
+          
+          # Print a final summary report
+          echo "=================================================="
+          echo "📊 GUARDDOG SCAN SUMMARY"
+          echo "=================================================="
+          
+          if [ -n "$PASSED_FILES" ]; then
+            echo -e "Clean files:$PASSED_FILES"
+          fi
+          
+          if [ -n "$FAILED_FILES" ]; then
+            echo -e "\nFiles with potential malware:$FAILED_FILES"
+          fi
+          
+          # If any of the scans failed, fail the workflow
+          if [ $OVERALL_EXIT_CODE -ne 0 ]; then
+            echo -e "\n🚨 GuardDog found potential issues in one or more files! Check the logs above."
+            exit $OVERALL_EXIT_CODE
+          else
+            echo -e "\n🎉 All dependency files passed the security scan!"
+          fi
