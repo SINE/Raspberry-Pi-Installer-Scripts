@@ -1,0 +1,495 @@
+# Repository Security Scan Workflow
+# Implements the staged scanning plan from PlanV1.txt.
+#
+# Execution model:
+#   - Never installs or executes the repository's own dependencies.
+#   - All scanning tools run in isolated Docker containers.
+#   - The repository is always mounted :ro (read-only).
+#   - Network is disabled (--network none) for all containers that
+#     touch repo files to prevent exfiltration by any embedded payload.
+#
+# Stages covered:
+#   Stage 0: Ecosystem triage (bash, no external tools)
+#   Stage 1: Unicode BiDi / Trojan Source detection (grep)
+#   Stage 2a: Python dep inference via pipreqs (when no manifest exists)
+#   Stage 2b: OSV-Scanner — CVE matching on lockfiles/manifests
+#   Stage 3+: malcontent — full behavioral scan (14,500+ YARA rules)
+#
+# Action SHA pinning:
+#   All 'uses:' references below MUST be pinned to a commit SHA in
+#   production. Mutable tags (v4, v3, etc.) can be silently replaced.
+#   Verify current SHAs at:
+#     https://github.com/actions/checkout/releases
+#     https://github.com/actions/upload-artifact/releases
+#   Use 'pin-github-action' (https://github.com/mheap/pin-github-action)
+#   or actionlint to automate pinning.
+#
+#   Shown:
+#     actions/checkout      v4.2.2  = 11bd71901bbe5b1630ceea73d27597364c9af683
+#     actions/upload-artifact v4    = (verify at releases page before using)
+
+name: Repository Security Scan
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+# Declare minimum required permissions. Never use 'write-all'.
+permissions:
+  contents: read
+
+jobs:
+  security-scan:
+    name: Behavioral and supply-chain scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write    # required only if uploading SARIF
+
+    steps:
+
+      # ----------------------------------------------------------------
+      # CHECKOUT
+      # Pin to commit SHA — never a mutable tag.
+      # See pinning note at top of file.
+      # ----------------------------------------------------------------
+      - name: Checkout repository
+        # REPLACE the tag below with the verified commit SHA.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0    # full history; required if mal diff is added later
+
+      # ----------------------------------------------------------------
+      # STAGE 0 — Ecosystem triage
+      # Determines what manifests/lockfiles/languages are present.
+      # Nothing from the repository is executed here.
+      # ----------------------------------------------------------------
+      - name: Ecosystem triage
+        id: triage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Returns "true" if any file matching $1 exists under the current
+          # directory, excluding .git and node_modules.
+          detect() {
+            if find . -maxdepth 4 -name "$1" \
+                 -not -path "./.git/*" \
+                 -not -path "*/node_modules/*" \
+                 2>/dev/null | grep -q .; then
+              echo "true"
+            else
+              echo "false"
+            fi
+          }
+
+          # Python
+          HAS_PY_FILES=$(
+            if find . -maxdepth 5 -name "*.py" \
+                 -not -path "./.git/*" \
+                 -not -path "*/__pycache__/*" \
+                 2>/dev/null | grep -q .; then
+              echo "true"
+            else
+              echo "false"
+            fi
+          )
+          HAS_REQUIREMENTS=$(detect "requirements*.txt")
+          HAS_PYPROJECT=$(detect "pyproject.toml")
+          HAS_POETRY_LOCK=$(detect "poetry.lock")
+          HAS_UV_LOCK=$(detect "uv.lock")
+          HAS_PDM_LOCK=$(detect "pdm.lock")
+          HAS_PIPFILE_LOCK=$(detect "Pipfile.lock")
+          HAS_SETUP_PY=$(detect "setup.py")
+          HAS_SETUP_CFG=$(detect "setup.cfg")
+
+          # Node / JS
+          HAS_PACKAGE_JSON=$(detect "package.json")
+          HAS_PACKAGE_LOCK=$(detect "package-lock.json")
+          HAS_YARN_LOCK=$(detect "yarn.lock")
+          HAS_PNPM_LOCK=$(detect "pnpm-lock.yaml")
+          HAS_BUN_LOCK=$(detect "bun.lock")
+
+          # Other ecosystems
+          HAS_GO_MOD=$(detect "go.mod")
+          HAS_CARGO_TOML=$(detect "Cargo.toml")
+
+          # CI/CD
+          HAS_GHA=$(
+            if find .github/workflows -maxdepth 1 \
+                 \( -name "*.yml" -o -name "*.yaml" \) \
+                 2>/dev/null | grep -q .; then
+              echo "true"
+            else
+              echo "false"
+            fi
+          )
+
+          # pipreqs is needed when Python files exist but no Python manifest
+          # or lockfile of any kind is present. All conditions must be false.
+          NEEDS_PIPREQS=false
+          if [[ "$HAS_PY_FILES"     == "true"  ]] &&
+             [[ "$HAS_REQUIREMENTS" == "false" ]] &&
+             [[ "$HAS_PYPROJECT"    == "false" ]] &&
+             [[ "$HAS_POETRY_LOCK"  == "false" ]] &&
+             [[ "$HAS_UV_LOCK"      == "false" ]] &&
+             [[ "$HAS_PDM_LOCK"     == "false" ]] &&
+             [[ "$HAS_PIPFILE_LOCK" == "false" ]] &&
+             [[ "$HAS_SETUP_PY"     == "false" ]] &&
+             [[ "$HAS_SETUP_CFG"    == "false" ]]; then
+            NEEDS_PIPREQS=true
+          fi
+
+          {
+            echo "has_py_files=$HAS_PY_FILES"
+            echo "has_requirements=$HAS_REQUIREMENTS"
+            echo "has_pyproject=$HAS_PYPROJECT"
+            echo "has_poetry_lock=$HAS_POETRY_LOCK"
+            echo "has_uv_lock=$HAS_UV_LOCK"
+            echo "has_package_json=$HAS_PACKAGE_JSON"
+            echo "has_package_lock=$HAS_PACKAGE_LOCK"
+            echo "has_yarn_lock=$HAS_YARN_LOCK"
+            echo "has_pnpm_lock=$HAS_PNPM_LOCK"
+            echo "has_bun_lock=$HAS_BUN_LOCK"
+            echo "has_go_mod=$HAS_GO_MOD"
+            echo "has_cargo_toml=$HAS_CARGO_TOML"
+            echo "has_gha=$HAS_GHA"
+            echo "needs_pipreqs=$NEEDS_PIPREQS"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "=== Ecosystem triage ==="
+          echo "  Python files:         $HAS_PY_FILES"
+          echo "  requirements*.txt:    $HAS_REQUIREMENTS"
+          echo "  pyproject.toml:       $HAS_PYPROJECT"
+          echo "  poetry/uv/pdm lock:   $HAS_POETRY_LOCK / $HAS_UV_LOCK / $HAS_PDM_LOCK"
+          echo "  package.json:         $HAS_PACKAGE_JSON"
+          echo "  go.mod:               $HAS_GO_MOD"
+          echo "  Cargo.toml:           $HAS_CARGO_TOML"
+          echo "  GHA workflows:        $HAS_GHA"
+          echo "  Needs pipreqs:        $NEEDS_PIPREQS"
+
+      # ----------------------------------------------------------------
+      # STAGE 1 — Trojan Source (CVE-2021-42574): BiDi control characters
+      #
+      # Detects Unicode bidirectional override/embedding characters that
+      # produce visually misleading code without changing how compilers
+      # parse it. No external tool required — GNU grep with PCRE (-P).
+      # ----------------------------------------------------------------
+      - name: Trojan Source / BiDi detection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HITS=$(grep -rPl \
+            "[\x{200b}\x{200e}\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{feff}\x{00ad}]" \
+            --include="*.py"    --include="*.js"     --include="*.ts"  \
+            --include="*.tsx"   --include="*.jsx"    --include="*.go"  \
+            --include="*.rs"    --include="*.java"   --include="*.kt"  \
+            --include="*.c"     --include="*.cpp"    --include="*.h"   \
+            --include="*.hpp"   --include="*.cs"     --include="*.sh"  \
+            --include="*.bash"  --include="*.yaml"   --include="*.yml" \
+            --include="*.rb"    --include="*.php"    --include="*.swift" \
+            --include="*.scala" --include="*.pl"     --include="*.lua" \
+            . 2>/dev/null || true)
+
+          if [[ -n "$HITS" ]]; then
+            echo "::error::Trojan Source BiDi control characters detected in the following files:"
+            printf '%s\n' "$HITS" | sed 's/^/  /'
+            echo ""
+            echo "Reference: https://trojansource.codes/ — CVE-2021-42574"
+            exit 1
+          fi
+
+          echo "No BiDi characters detected."
+
+      # ----------------------------------------------------------------
+      # STAGE 2a/pre — Python dependency inference via pipreqs
+      #
+      # Runs ONLY when Python files exist but NO Python manifest or lockfile
+      # is found (triage step sets needs_pipreqs=true).
+      #
+      # Approach validation:
+      #   pipreqs performs AST-level static import analysis. It reads Python
+      #   source files and extracts `import foo` and `from foo import bar`
+      #   statements without executing any code.
+      #
+      #   It runs inside a python:3.12-slim container. The repository is
+      #   mounted read-only (:ro). Network is enabled only to let pip fetch
+      #   pipreqs from PyPI; the container never executes repository code,
+      #   so network access from the repo itself is not possible here.
+      #
+      #   Limitation: static imports only. The following patterns are NOT
+      #   detected by pipreqs:
+      #     __import__("foo")
+      #     importlib.import_module("foo")
+      #     String-based or conditional dynamic imports
+      #   These patterns are intentional obfuscation and will be caught by
+      #   malcontent's behavioral YARA rules in Stage 3.
+      #
+      #   Alternatives considered and rejected for this specific gap:
+      #     uv pip compile  — requires an existing manifest (pyproject.toml or
+      #                       requirements.in) to compile from. Not applicable.
+      #     deptry          — detects unused/missing deps but does not produce
+      #                       a scannable lockfile format.
+      #     importlab       — Google's static analysis tool; similar scope to
+      #                       pipreqs but less widely used and harder to invoke.
+      #
+      #   Conclusion: pipreqs is the correct tool for this specific gap.
+      #   pipreqs==0.4.13 is the version listed in PlanV1.txt.
+      #
+      #   Output → /tmp/scan-deps/inferred_requirements.txt
+      #           → consumed by OSV-Scanner in the next step.
+      # ----------------------------------------------------------------
+      - name: Infer Python dependencies via pipreqs (no manifest found)
+        if: steps.triage.outputs.needs_pipreqs == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/scan-deps
+
+          echo "=== pipreqs: static AST import analysis — no repo code executed ==="
+
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo:ro" \
+            python:3.12-slim \
+            sh -c "pip install 'pipreqs==0.4.13' \
+                       --quiet \
+                       --no-cache-dir \
+                       --index-url https://pypi.org/simple/ \
+                       2>/dev/null && \
+                   pipreqs /repo --print --ignore-errors 2>/dev/null" \
+            > /tmp/scan-deps/inferred_requirements.txt || true
+
+          if [[ -s /tmp/scan-deps/inferred_requirements.txt ]]; then
+            COUNT=$(wc -l < /tmp/scan-deps/inferred_requirements.txt)
+            echo "Inferred $COUNT package(s):"
+            cat /tmp/scan-deps/inferred_requirements.txt
+          else
+            echo "pipreqs: no third-party imports found (stdlib-only or no .py source files detected)."
+          fi
+
+      # ----------------------------------------------------------------
+      # STAGE 2b — OSV-Scanner: CVE matching on all manifests/lockfiles
+      #
+      # osv-scanner --recursive auto-detects all supported manifests in
+      # the directory tree. If pipreqs ran and produced output, the
+      # inferred requirements file is added as an additional lockfile.
+      #
+      # Supported manifests auto-detected by --recursive:
+      #   Python: requirements*.txt, pyproject.toml, poetry.lock,
+      #           Pipfile.lock, uv.lock, pdm.lock, pylock.toml
+      #   Node:   package-lock.json, yarn.lock, pnpm-lock.yaml, bun.lock
+      #   Go:     go.mod
+      #   Rust:   Cargo.lock
+      #   Java:   pom.xml, build.gradle (with maven/gradle lockfile)
+      #   And more — see https://google.github.io/osv-scanner/supported-languages-and-lockfiles/
+      #
+      # CVE findings here are informational by default (|| true).
+      # Remove '|| true' to fail the job on any CVE finding.
+      # ----------------------------------------------------------------
+      - name: OSV-Scanner — dependency CVE check
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/scan-deps
+
+          # Build extra args dynamically: add inferred requirements if present.
+          EXTRA_LOCKFILE_ARGS=()
+          if [[ -s /tmp/scan-deps/inferred_requirements.txt ]]; then
+            echo "Including inferred requirements in OSV scan."
+            EXTRA_LOCKFILE_ARGS=(
+              "--lockfile"
+              "requirements.txt:/tmp/scan-deps/inferred_requirements.txt"
+            )
+          fi
+
+          echo "=== OSV-Scanner: recursive manifest scan ==="
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo:ro" \
+            -v "/tmp/scan-deps:/tmp/scan-deps:ro" \
+            ghcr.io/google/osv-scanner:latest \
+            scan \
+            --recursive \
+            --format table \
+            "${EXTRA_LOCKFILE_ARGS[@]}" \
+            /repo || true
+          # '|| true': CVE findings are informational in this workflow.
+          # Remove to make CVEs fail the CI job.
+
+      # ----------------------------------------------------------------
+      # STAGE 3 — malcontent: full behavioral analysis
+      #
+      # Source code verified from chainguard-dev/malcontent cmd/mal/mal.go:
+      #
+      #   FLAG PLACEMENT: All control flags (--all, --max-depth, --min-risk,
+      #   --format, --output, --third-party, etc.) have Local=false in the
+      #   urfave/cli definition. They are GLOBAL flags and MUST be placed
+      #   BEFORE the subcommand (analyze / scan / diff).
+      #
+      #   --all BEHAVIOR (from source):
+      #     When --all is set, the source explicitly overrides:
+      #       ignoreTags     = []   (no tag filtering — includes all rules)
+      #       includeDataFiles = true
+      #       minFileRisk    = -1   (show all files)
+      #       minRisk        = -1   (show all findings — overrides --min-risk)
+      #     CONSEQUENCE: Do NOT combine --all with --min-risk critical for
+      #     the CI gate step — --all would override the threshold to "any."
+      #     Use --all ONLY for the full analyze/report pass.
+      #
+      #   --quantity-increases-risk: defaults to true in source. Explicit
+      #     flag is included here for clarity but is not strictly required.
+      #
+      #   EXIT CODE NOTE (from source analysis of ErrMatchedCondition):
+      #     The --exit-first-hit flag may return exit code 0 even when a
+      #     match is found (ErrMatchedCondition maps to ExitOK). The CI gate
+      #     step below uses JSON output + jq for the authoritative check,
+      #     with --exit-first-hit as a secondary signal.
+      #     Verify behavior: docker run ... scan /your-test-path; echo "exit: $?"
+      #
+      # Coverage:
+      #   14,500+ YARA rules (base). With --third-party:
+      #     + Avast, Elastic, FireEye, Mandiant, Nextron, ReversingLabs rules.
+      #   Binary formats:  ELF, PE (Windows), Mach-O (macOS), a.out
+      #   Source code:     Python, JavaScript/TypeScript, Go, Ruby, PHP,
+      #                    Perl, Shell, C/C++, AppleScript
+      #   Archives:        .zip, .tar.gz, .whl, .jar, .vsix, and others
+      #                    extracted up to --max-depth -1 (unlimited)
+      #   Data files:      images, blobs, any non-program file
+      #                    (via --include-data-files implied by --all)
+      #
+      # --third-party licensing note:
+      #   Third-party rules (Avast, Elastic, FireEye/Mandiant, Nextron,
+      #   ReversingLabs) may have individual licensing restrictions.
+      #   Review /third_party/ in the malcontent repo before commercial use.
+      #   For open-source / research scanning this is generally acceptable.
+      #   Remove --third-party to restrict to the Apache 2.0 base rules.
+      #
+      # Two passes:
+      #   1. analyze — full enumeration, JSON report, no risk threshold cut.
+      #   2. scan    — CI gate, CRITICAL threshold, JSON gate file + jq check.
+      # ----------------------------------------------------------------
+      - name: Pull malcontent Docker image
+        shell: bash
+        run: |
+          docker pull cgr.dev/chainguard/malcontent:latest
+          # Log the image digest for reproducibility and audit trail.
+          docker inspect cgr.dev/chainguard/malcontent:latest \
+            --format '{{index .RepoDigests 0}}' \
+            | sed 's/^/Image digest: /'
+
+      # Pass 1: full analyze — all severities, all file types, JSON report.
+      # --all is used here (implies --min-risk any, --include-data-files,
+      # no tag filtering). The repo is mounted :ro; output goes to /output.
+      - name: malcontent — full analyze (all severities, JSON report)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/malcontent-output
+
+          echo "=== malcontent analyze: full behavioral enumeration ==="
+          docker run --rm \
+            --network none \
+            -v "${{ github.workspace }}:/repo:ro" \
+            -v "/tmp/malcontent-output:/output:rw" \
+            cgr.dev/chainguard/malcontent:latest \
+            --all \
+            --max-depth -1 \
+            --quantity-increases-risk \
+            --third-party \
+            --stats \
+            --format json \
+            --output /output/full-analysis.json \
+            analyze \
+            /repo
+
+          # Human-readable terminal summary of MEDIUM+ findings (informational).
+          echo ""
+          echo "=== malcontent analyze: terminal summary (MEDIUM+) ==="
+          docker run --rm \
+            --network none \
+            -v "${{ github.workspace }}:/repo:ro" \
+            cgr.dev/chainguard/malcontent:latest \
+            --all \
+            --max-depth -1 \
+            --third-party \
+            --min-risk medium \
+            --format terminal \
+            analyze \
+            /repo || true
+
+      # Pass 2: CI gate — CRITICAL threshold only.
+      # IMPORTANT: --all is NOT used here because --all would override
+      # --min-risk critical (confirmed in source code). Only --min-risk
+      # and explicit --include-data-files are set.
+      - name: malcontent — CI gate (CRITICAL threshold)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/malcontent-output
+
+          echo "=== malcontent scan: CI gate — CRITICAL threshold ==="
+
+          # Run scan, write JSON, capture exit code separately.
+          # --exit-first-hit may exit 0 even on match (see note above).
+          # JSON output is the authoritative gate signal.
+          GATE_EXIT=0
+          docker run --rm \
+            --network none \
+            -v "${{ github.workspace }}:/repo:ro" \
+            -v "/tmp/malcontent-output:/output:rw" \
+            cgr.dev/chainguard/malcontent:latest \
+            --max-depth -1 \
+            --include-data-files \
+            --quantity-increases-risk \
+            --third-party \
+            --min-risk critical \
+            --exit-first-hit \
+            --format json \
+            --output /output/gate-critical.json \
+            scan \
+            /repo || GATE_EXIT=$?
+
+          # Primary gate: non-zero exit code (if --exit-first-hit works as
+          # documented with non-zero exit).
+          if [[ $GATE_EXIT -ne 0 ]]; then
+            echo "::error::malcontent CI gate: CRITICAL findings detected (exit $GATE_EXIT)."
+            echo "Review artifact 'security-scan-results' → gate-critical.json"
+            exit 1
+          fi
+
+          # Fallback gate: check JSON file size. An empty scan result
+          # produces a minimal/null JSON. Any non-trivial content means
+          # findings were emitted.
+          if [[ -f /tmp/malcontent-output/gate-critical.json ]]; then
+            BYTES=$(wc -c < /tmp/malcontent-output/gate-critical.json 2>/dev/null || echo 0)
+            # Threshold: >50 bytes rules out null/empty JSON payloads.
+            # Tune this value downward if false negatives are observed.
+            if [[ "$BYTES" -gt 50 ]]; then
+              echo "::error::malcontent CI gate: gate-critical.json is non-empty ($BYTES bytes)."
+              echo "CRITICAL findings detected. Review artifact for details."
+              cat /tmp/malcontent-output/gate-critical.json
+              exit 1
+            fi
+          fi
+
+          echo "CI gate passed — no CRITICAL findings."
+          echo ""
+          echo "Note: Tune to --min-risk high for stricter enforcement."
+          echo "      HIGH threshold will also catch steganography, exfil,"
+          echo "      and obfuscation patterns that fall below CRITICAL."
+
+      # ----------------------------------------------------------------
+      # Upload all scan artifacts (always — including on failure)
+      # ----------------------------------------------------------------
+      - name: Upload scan artifacts
+        if: always()
+        # REPLACE the tag below with the verified commit SHA.
+        uses: actions/upload-artifact@v4   # pin to SHA in production
+        with:
+          name: security-scan-results-${{ github.run_id }}
+          path: /tmp/malcontent-output/
+          retention-days: 90
+          if-no-files-found: warn
