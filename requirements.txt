@@ -78,5 +78,5 @@ spidev
 
 # --- [C] PyPI equivalents of apt-installed runtime Python packages ---
 # apt package name is noted inline.
-Pillow        # apt: python3-pil
-numpy         # apt: python3-numpy
+Pillow>=12.2.0  # apt: python3-pil
+numpy           # apt: python3-numpy
