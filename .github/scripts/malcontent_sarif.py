@@ -2,7 +2,11 @@
 """
 malcontent JSON -> SARIF 2.1.0 converter.
 
-Usage: malcontent_sarif.py <src.json> <dst.sarif>
+Usage: malcontent_sarif.py <src.json> <dst.sarif> [automation-id]
+
+  automation-id  Value written to .runs[].automationDetails.id.
+                 Defaults to "malcontent/" when omitted.
+                 Must be unique per upload-sarif call within the same job.
 
 Understands the FileReport / Behavior schema from malcontent
 (pkg/malcontent/malcontent.go):
@@ -21,6 +25,7 @@ RiskLevel -> SARIF level:
 import json, sys, hashlib
 
 src, dst = sys.argv[1], sys.argv[2]
+automation_id = sys.argv[3] if len(sys.argv) > 3 else "malcontent/"
 
 RISK_MAP = {
     "CRITICAL": ("error",   "9.5"),
@@ -96,7 +101,7 @@ def make_sarif(json_path):
             "name": "malcontent", "version": "latest",
             "informationUri": "https://github.com/chainguard-dev/malcontent",
             "rules": rules
-        }}, "automationDetails": {"id": "malcontent/"}, "results": results}]
+        }}, "automationDetails": {"id": automation_id}, "results": results}]
     }
 
 EMPTY_SARIF = {

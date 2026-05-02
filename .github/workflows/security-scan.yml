@@ -766,7 +766,8 @@ jobs:
           # Script is in .github/scripts/ to avoid YAML heredoc indentation issues.
           python3 .github/scripts/malcontent_sarif.py \
             /tmp/malcontent-output/full-analysis.json \
-            /tmp/sarif/malcontent-full.sarif
+            /tmp/sarif/malcontent-full.sarif \
+            malcontent/full
 
       - name: Upload malcontent SARIF (full analysis) to Security tab
         if: always()
@@ -869,7 +870,8 @@ jobs:
           # Reuse the converter script from .github/scripts/.
           python3 .github/scripts/malcontent_sarif.py \
             /tmp/malcontent-output/gate-critical.json \
-            /tmp/sarif/malcontent-gate.sarif
+            /tmp/sarif/malcontent-gate.sarif \
+            malcontent/gate
 
       - name: Upload malcontent SARIF (CI gate) to Security tab
         if: always()
