@@ -1,2 +1,0 @@
-udev rule for STMPE Resistive Touchscreen Controller
-SUBSYSTEM=="input", ATTRS{name}=="*stmpe*", ENV{DEVNAME}=="*event*", SYMLINK+="input/touchscreen"

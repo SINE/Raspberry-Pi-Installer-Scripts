@@ -1,0 +1,82 @@
+# =============================================================================
+# requirements.txt — Adafruit Raspberry Pi Installer Scripts
+# =============================================================================
+#
+# PURPOSE
+# -------
+# This file exists so the repository's security scanner (OSV-Scanner, pipreqs,
+# malcontent) can check every Python dependency for known CVEs, malicious
+# packages, and supply-chain issues without executing any repository code.
+#
+# SCANNER INTEGRATION
+# -------------------
+# The CI security-scan workflow (/.github/workflows/security-scan.yml) uses
+# the following staged approach for Python dependencies:
+#
+#   Stage 0 (triage): Detects this file via "requirements*.txt" glob.
+#                     Sets has_requirements=true → needs_pipreqs=false.
+#                     pipreqs static-AST inference is SKIPPED because this
+#                     file is present (pipreqs only runs when no manifest
+#                     exists at all).
+#
+#   Stage 2b (OSV):   osv-scanner --recursive auto-detects this file and
+#                     checks each package against the OSV vulnerability
+#                     database for known CVEs.
+#
+#   Stage 3 (malcontent): Scans the repo including this file with 14,500+
+#                         YARA rules for behavioural and supply-chain threats.
+#
+# NOTE ON pipreqs LIMITATIONS
+# ---------------------------
+# pipreqs performs AST-level import analysis. It would correctly find
+# "import click" but maps "from adafruit_shell import Shell" via a PyPI
+# name-lookup, where the import name "adafruit_shell" differs from the
+# actual PyPI package name "adafruit-python-shell". pipreqs may silently
+# drop it or emit an incorrect package name. This explicit file is therefore
+# more reliable than the pipreqs fallback for this repository.
+#
+# =============================================================================
+# PACKAGE CATEGORIES
+# =============================================================================
+#
+# [A] SCRIPT-RUNNER DEPENDENCIES
+#     Must be installed before executing any script in this repository.
+#     Install command (run as the invoking user):
+#
+#         pip3 install --upgrade adafruit-python-shell click
+#
+# [B] RUNTIME TARGET DEPENDENCIES — pip-installable
+#     Installed by adafruit-pitft.py onto the target Raspberry Pi.
+#     Install command (run on the Pi, as root):
+#
+#         sudo pip3 install --upgrade adafruit-blinka \
+#             adafruit-circuitpython-rgb-display spidev
+#
+# [C] RUNTIME TARGET DEPENDENCIES — apt-only
+#     Installed via apt; no direct PyPI equivalent for fonts-dejavu.
+#     PyPI equivalents for the Python packages are listed below so
+#     OSV-Scanner can check them for CVEs.
+#     Install command (run on the Pi, as root):
+#
+#         sudo apt install -y fonts-dejavu python3-pil python3-numpy
+#
+#     fonts-dejavu   → font assets only; no PyPI package; not listed below.
+#     python3-pil    → PyPI: Pillow
+#     python3-numpy  → PyPI: numpy
+#
+# =============================================================================
+
+# --- [A] Script-runner dependencies ---
+# Required to execute adafruit-pitft.py and raspi-spi-reassign.py.
+adafruit-python-shell
+click
+
+# --- [B] Runtime pip dependencies (installed on target Pi by the scripts) ---
+adafruit-blinka
+adafruit-circuitpython-rgb-display
+spidev
+
+# --- [C] PyPI equivalents of apt-installed runtime Python packages ---
+# apt package name is noted inline.
+Pillow        # apt: python3-pil
+numpy         # apt: python3-numpy
