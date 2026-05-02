@@ -296,6 +296,10 @@ static int set_var(struct fbtft_par *par)
 	struct fbtft_display *display = &par->pdata->display;
 	u32 width = display->width;
 	u32 height = display->height;
+
+	if (height > 320 || width > 240)
+		return -EINVAL;
+
 	if (par->bgr)
 		madctl_par |= MADCTL_BGR;
 
@@ -379,6 +383,9 @@ static int set_gamma(struct fbtft_par *par, u32 *curves)
 		0x3F, /* V61[5:0] */
 		0x3F, /* V62[5:0] */
 	};
+
+	if (par->gamma.num_values > (int)ARRAY_SIZE(gamma_par_mask))
+		return -EINVAL;
 
 	for (i = 0; i < par->gamma.num_curves; i++) {
 		c = i * par->gamma.num_values;
