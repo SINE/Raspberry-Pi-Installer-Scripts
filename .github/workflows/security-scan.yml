@@ -390,10 +390,11 @@ jobs:
           mkdir -p /tmp/malcontent-output
 
           echo "=== malcontent analyze: full behavioral enumeration ==="
+          # stdout is redirected to the host-owned file — no /output mount
+          # needed. Avoids permission denied from container non-root user.
           docker run --rm \
             --network none \
             -v "${{ github.workspace }}:/repo:ro" \
-            -v "/tmp/malcontent-output:/output:rw" \
             cgr.dev/chainguard/malcontent:latest \
             --all \
             --max-depth -1 \
@@ -401,9 +402,9 @@ jobs:
             --third-party \
             --stats \
             --format json \
-            --output /output/full-analysis.json \
             analyze \
-            /repo
+            /repo \
+            > /tmp/malcontent-output/full-analysis.json
 
           # Human-readable terminal summary of MEDIUM+ findings (informational).
           echo ""
@@ -436,10 +437,10 @@ jobs:
           # --exit-first-hit may exit 0 even on match (see note above).
           # JSON output is the authoritative gate signal.
           GATE_EXIT=0
+          # stdout redirected to host-owned file — same pattern as analyze pass.
           docker run --rm \
             --network none \
             -v "${{ github.workspace }}:/repo:ro" \
-            -v "/tmp/malcontent-output:/output:rw" \
             cgr.dev/chainguard/malcontent:latest \
             --max-depth -1 \
             --include-data-files \
@@ -448,9 +449,10 @@ jobs:
             --min-risk critical \
             --exit-first-hit \
             --format json \
-            --output /output/gate-critical.json \
             scan \
-            /repo || GATE_EXIT=$?
+            /repo \
+            > /tmp/malcontent-output/gate-critical.json \
+            || GATE_EXIT=$?
 
           # Primary gate: non-zero exit code (if --exit-first-hit works as
           # documented with non-zero exit).
