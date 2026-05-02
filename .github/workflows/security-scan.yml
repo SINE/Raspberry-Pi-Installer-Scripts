@@ -15,18 +15,32 @@
 #   Stage 2b: OSV-Scanner — CVE matching on lockfiles/manifests
 #   Stage 3+: malcontent — full behavioral scan (14,500+ YARA rules)
 #
+# GitHub Security tab integration:
+#   Every stage produces a SARIF 2.1.0 file that is uploaded via
+#   github/codeql-action/upload-sarif to populate the Security tab.
+#   Each tool uses a distinct 'category' so results don't overwrite each
+#   other.  All upload steps run with 'if: always()' so reports appear
+#   even when the job fails or the CI gate trips.
+#
+#   Tools → Security tab categories:
+#     trojan-source  — Stage 1 BiDi/Trojan-Source findings
+#     osv-scanner    — Stage 2b CVE findings from OSV-Scanner
+#     malcontent     — Stage 3 behavioral findings from malcontent
+#
 # Action SHA pinning:
 #   All 'uses:' references below MUST be pinned to a commit SHA in
 #   production. Mutable tags (v4, v3, etc.) can be silently replaced.
 #   Verify current SHAs at:
 #     https://github.com/actions/checkout/releases
 #     https://github.com/actions/upload-artifact/releases
+#     https://github.com/github/codeql-action/releases
 #   Use 'pin-github-action' (https://github.com/mheap/pin-github-action)
 #   or actionlint to automate pinning.
 #
 #   Shown:
-#     actions/checkout      v4.2.2  = 11bd71901bbe5b1630ceea73d27597364c9af683
-#     actions/upload-artifact v4    = (verify at releases page before using)
+#     actions/checkout            v4.2.2  = 11bd71901bbe5b1630ceea73d27597364c9af683
+#     actions/upload-artifact     v4      = (verify at releases page before using)
+#     github/codeql-action/upload-sarif v3 = (verify at releases page before using)
 
 name: Repository Security Scan
 
@@ -47,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write    # required only if uploading SARIF
+      security-events: write    # required for upload-sarif to post to Security tab
 
     steps:
 
@@ -177,11 +191,19 @@ jobs:
       # Detects Unicode bidirectional override/embedding characters that
       # produce visually misleading code without changing how compilers
       # parse it. No external tool required — GNU grep with PCRE (-P).
+      #
+      # SARIF output: findings are written to
+      #   /tmp/sarif/trojan-source.sarif
+      # and uploaded to the Security tab via upload-sarif regardless of
+      # whether hits were found (an empty results array is valid SARIF
+      # and allows the tool to appear as "passing" in the Security tab).
       # ----------------------------------------------------------------
       - name: Trojan Source / BiDi detection
+        id: bidi
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p /tmp/sarif
 
           HITS=$(grep -rPl \
             "[\x{200b}\x{200e}\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{feff}\x{00ad}]" \
@@ -195,15 +217,94 @@ jobs:
             --include="*.scala" --include="*.pl"     --include="*.lua" \
             . 2>/dev/null || true)
 
-          if [[ -n "$HITS" ]]; then
-            echo "::error::Trojan Source BiDi control characters detected in the following files:"
-            printf '%s\n' "$HITS" | sed 's/^/  /'
-            echo ""
-            echo "Reference: https://trojansource.codes/ — CVE-2021-42574"
-            exit 1
-          fi
+          # Build SARIF 2.1.0.  One result per affected file.
+          # physicalLocation points to line 1 col 1 of the file; the
+          # annotation in the Security tab links directly to the file.
+          python3 - "$HITS" <<'PYEOF'
+import json, sys, os
 
-          echo "No BiDi characters detected."
+hits_raw = sys.argv[1].strip()
+hits = [h for h in hits_raw.splitlines() if h.strip()] if hits_raw else []
+
+results = []
+for filepath in hits:
+    # Strip leading "./" so paths are repo-root-relative
+    rel = filepath.lstrip("./")
+    results.append({
+        "ruleId": "trojan-source/bidi-control-char",
+        "level": "error",
+        "message": {
+            "text": (
+                f"Trojan Source: Unicode BiDi control character detected in '{rel}'. "
+                "These characters can make malicious code appear visually benign. "
+                "Reference: https://trojansource.codes/ — CVE-2021-42574"
+            )
+        },
+        "locations": [{
+            "physicalLocation": {
+                "artifactLocation": {"uri": rel, "uriBaseId": "%SRCROOT%"},
+                "region": {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1}
+            }
+        }]
+    })
+
+sarif = {
+    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+    "version": "2.1.0",
+    "runs": [{
+        "tool": {
+            "driver": {
+                "name": "trojan-source",
+                "version": "1.0.0",
+                "informationUri": "https://trojansource.codes/",
+                "rules": [{
+                    "id": "trojan-source/bidi-control-char",
+                    "name": "BidiControlCharacter",
+                    "shortDescription": {"text": "Unicode BiDi control character (Trojan Source, CVE-2021-42574)"},
+                    "fullDescription": {"text": (
+                        "Unicode bidirectional control characters (U+200B, U+200E, U+200F, "
+                        "U+202A-U+202E, U+2066-U+2069, U+FEFF, U+00AD) can reorder displayed "
+                        "text so that malicious code appears visually harmless. This is the "
+                        "Trojan Source attack (CVE-2021-42574)."
+                    )},
+                    "defaultConfiguration": {"level": "error"},
+                    "help": {
+                        "text": "Remove the BiDi control character. Reference: https://trojansource.codes/",
+                        "markdown": "Remove the BiDi control character. See [trojansource.codes](https://trojansource.codes/) and [CVE-2021-42574](https://nvd.nist.gov/vuln/detail/CVE-2021-42574)."
+                    },
+                    "properties": {
+                        "tags": ["security", "supply-chain"],
+                        "precision": "very-high",
+                        "security-severity": "8.0"
+                    }
+                }]
+            }
+        },
+        "results": results
+    }]
+}
+
+out = "/tmp/sarif/trojan-source.sarif"
+with open(out, "w") as f:
+    json.dump(sarif, f, indent=2)
+
+if hits:
+    print(f"::error::Trojan Source BiDi control characters detected in {len(hits)} file(s).")
+    for h in hits:
+        print(f"  {h}")
+    print("Reference: https://trojansource.codes/ — CVE-2021-42574")
+    sys.exit(1)
+else:
+    print("No BiDi characters detected.")
+PYEOF
+
+      - name: Upload Trojan Source SARIF to Security tab
+        if: always()
+        # REPLACE with verified commit SHA — see pinning note at top.
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: /tmp/sarif/trojan-source.sarif
+          category: trojan-source
 
       # ----------------------------------------------------------------
       # STAGE 2a/pre — Python dependency inference via pipreqs
@@ -287,14 +388,21 @@ jobs:
       #   Java:   pom.xml, build.gradle (with maven/gradle lockfile)
       #   And more — see https://google.github.io/osv-scanner/supported-languages-and-lockfiles/
       #
-      # CVE findings here are informational by default (|| true).
-      # Remove '|| true' to fail the job on any CVE finding.
+      # Two output passes:
+      #   1. --format sarif → /tmp/sarif/osv-scanner.sarif (Security tab)
+      #   2. --format table → terminal (human-readable log)
+      #
+      # Exit code 1 from OSV-Scanner means vulnerabilities were found.
+      # Both passes use '|| true' so findings are informational by default
+      # and don't block CI.  Remove '|| true' to fail CI on any CVE.
+      # The SARIF upload step runs with 'if: always()' so the Security
+      # tab is populated regardless.
       # ----------------------------------------------------------------
       - name: OSV-Scanner — dependency CVE check
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/scan-deps
+          mkdir -p /tmp/scan-deps /tmp/sarif
 
           # Build extra args dynamically: add inferred requirements if present.
           EXTRA_LOCKFILE_ARGS=()
@@ -306,7 +414,22 @@ jobs:
             )
           fi
 
-          echo "=== OSV-Scanner: recursive manifest scan ==="
+          echo "=== OSV-Scanner pass 1: SARIF output (for Security tab) ==="
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo:ro" \
+            -v "/tmp/scan-deps:/tmp/scan-deps:ro" \
+            ghcr.io/google/osv-scanner:latest \
+            scan \
+            --recursive \
+            --format sarif \
+            "${EXTRA_LOCKFILE_ARGS[@]}" \
+            /repo \
+            > /tmp/sarif/osv-scanner.sarif || true
+          # '|| true': exit code 1 = vulns found; don't abort — SARIF is
+          # still written and will be uploaded to the Security tab.
+
+          echo ""
+          echo "=== OSV-Scanner pass 2: table summary (human-readable log) ==="
           docker run --rm \
             -v "${{ github.workspace }}:/repo:ro" \
             -v "/tmp/scan-deps:/tmp/scan-deps:ro" \
@@ -316,8 +439,14 @@ jobs:
             --format table \
             "${EXTRA_LOCKFILE_ARGS[@]}" \
             /repo || true
-          # '|| true': CVE findings are informational in this workflow.
-          # Remove to make CVEs fail the CI job.
+
+      - name: Upload OSV-Scanner SARIF to Security tab
+        if: always()
+        # REPLACE with verified commit SHA — see pinning note at top.
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: /tmp/sarif/osv-scanner.sarif
+          category: osv-scanner
 
       # ----------------------------------------------------------------
       # STAGE 3 — malcontent: full behavioral analysis
@@ -421,10 +550,150 @@ jobs:
             analyze \
             /repo || true
 
+      # Convert malcontent full-analysis JSON to SARIF 2.1.0.
+      #
+      # malcontent has no native SARIF emitter.  This step uses an inline
+      # Python converter that understands the FileReport / Behavior schema
+      # (verified against pkg/malcontent/malcontent.go):
+      #
+      #   Top-level JSON: {"Files": {"<path>": <FileReport>}, ...}
+      #   FileReport:     {Path, RiskScore, RiskLevel, Behaviors:[...], ...}
+      #   Behavior:       {ID, RiskScore, RiskLevel, Description,
+      #                    MatchStrings, RuleURL, ReferenceURL, ...}
+      #
+      # RiskLevel → SARIF level mapping:
+      #   CRITICAL → error   (security-severity 9.5)
+      #   HIGH     → error   (security-severity 7.5)
+      #   MEDIUM   → warning (security-severity 5.0)
+      #   LOW      → note    (security-severity 2.0)
+      #   (any other / missing) → note
+      #
+      # Each unique Behavior.ID becomes a SARIF rule.
+      # Each (file, behavior) pair becomes a SARIF result pointing to the
+      # file at line 1 col 1.  The Security tab shows one alert per result.
+      #
+      # This step converts full-analysis.json only.  gate-critical.json is
+      # converted in a separate step after the CI gate step runs, so both
+      # source files exist when each converter step executes.
+      - name: Convert malcontent full-analysis JSON to SARIF
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sarif
+
+          python3 - /tmp/malcontent-output/full-analysis.json /tmp/sarif/malcontent-full.sarif <<'PYEOF'
+import json, os, sys, hashlib
+
+src, dst = sys.argv[1], sys.argv[2]
+
+RISK_MAP = {
+    "CRITICAL": ("error",   "9.5"),
+    "HIGH":     ("error",   "7.5"),
+    "MEDIUM":   ("warning", "5.0"),
+    "LOW":      ("note",    "2.0"),
+}
+
+def risk_to_sarif_level(risk_level):
+    return RISK_MAP.get((risk_level or "").upper(), ("note", "1.0"))
+
+def behaviors_to_rules(all_behaviors):
+    seen = {}
+    for b in all_behaviors:
+        bid = b.get("ID") or b.get("RuleName") or "unknown"
+        if bid not in seen:
+            level, sec_sev = risk_to_sarif_level(b.get("RiskLevel", ""))
+            desc = b.get("Description") or bid
+            rule_url = b.get("RuleURL") or b.get("ReferenceURL") or ""
+            help_md = desc + (f"\n\nRule: [{rule_url}]({rule_url})" if rule_url else "")
+            seen[bid] = {
+                "id": bid,
+                "name": bid.replace("/", "-").replace(".", "-"),
+                "shortDescription": {"text": desc[:1024]},
+                "fullDescription":  {"text": desc[:1024]},
+                "defaultConfiguration": {"level": level},
+                "help": {"text": desc[:1024], "markdown": help_md[:1024]},
+                "properties": {
+                    "tags": ["security", "supply-chain"],
+                    "precision": "high",
+                    "security-severity": sec_sev,
+                    "problem.severity": "error" if level == "error" else "warning",
+                }
+            }
+    return list(seen.values())
+
+def make_sarif(json_path):
+    try:
+        with open(json_path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"  Skipping {json_path}: {e}", file=sys.stderr)
+        return None
+    files_map = data.get("Files") or {}
+    all_behaviors = [b for fr in files_map.values() for b in (fr.get("Behaviors") or [])]
+    rules      = behaviors_to_rules(all_behaviors)
+    rule_index = {r["id"]: i for i, r in enumerate(rules)}
+    results = []
+    for path, fr in files_map.items():
+        rel = path.removeprefix("/repo/").lstrip("/")
+        for b in (fr.get("Behaviors") or []):
+            bid   = b.get("ID") or b.get("RuleName") or "unknown"
+            level, _ = risk_to_sarif_level(b.get("RiskLevel", ""))
+            desc  = b.get("Description") or bid
+            matches = b.get("MatchStrings") or []
+            msg_text = desc + (" Matched: " + ", ".join(str(m) for m in matches[:5]) if matches else "")
+            fp = hashlib.sha256(f"{bid}:{rel}".encode()).hexdigest()[:16]
+            results.append({
+                "ruleId":    bid,
+                "ruleIndex": rule_index.get(bid, 0),
+                "level":     level,
+                "message":   {"text": msg_text[:1024]},
+                "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": rel, "uriBaseId": "%SRCROOT%"},
+                    "region": {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1}
+                }}],
+                "partialFingerprints": {"primaryLocationLineHash": f"{fp}:1"}
+            })
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{"tool": {"driver": {
+            "name": "malcontent", "version": "latest",
+            "informationUri": "https://github.com/chainguard-dev/malcontent",
+            "rules": rules
+        }}, "automationDetails": {"id": "malcontent/"}, "results": results}]
+    }
+
+EMPTY_SARIF = {
+    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+    "version": "2.1.0",
+    "runs": [{"tool": {"driver": {"name": "malcontent", "rules": []}}, "results": []}]
+}
+sarif = make_sarif(src) or EMPTY_SARIF
+with open(dst, "w") as f:
+    json.dump(sarif, f, indent=2)
+print(f"  {dst}: {len(sarif['runs'][0]['results'])} result(s)")
+PYEOF
+
+      - name: Upload malcontent SARIF (full analysis) to Security tab
+        if: always()
+        # REPLACE with verified commit SHA — see pinning note at top.
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: /tmp/sarif/malcontent-full.sarif
+          category: malcontent
+
       # Pass 2: CI gate — CRITICAL threshold only.
       # IMPORTANT: --all is NOT used here because --all would override
       # --min-risk critical (confirmed in source code). Only --min-risk
       # and explicit --include-data-files are set.
+      #
+      # The gate-critical.json written here is also consumed by the
+      # "Convert malcontent JSON to SARIF" step above to produce
+      # malcontent-gate.sarif.  Both SARIF files are uploaded to the
+      # Security tab under the same 'malcontent' category; GitHub
+      # deduplicates alerts by ruleId+location fingerprint so no
+      # duplicate alerts are created.
       - name: malcontent — CI gate (CRITICAL threshold)
         shell: bash
         run: |
@@ -459,6 +728,7 @@ jobs:
           if [[ $GATE_EXIT -ne 0 ]]; then
             echo "::error::malcontent CI gate: CRITICAL findings detected (exit $GATE_EXIT)."
             echo "Review artifact 'security-scan-results' → gate-critical.json"
+            echo "Review Security tab → malcontent category for annotated findings."
             exit 1
           fi
 
@@ -471,7 +741,7 @@ jobs:
             # Tune this value downward if false negatives are observed.
             if [[ "$BYTES" -gt 50 ]]; then
               echo "::error::malcontent CI gate: gate-critical.json is non-empty ($BYTES bytes)."
-              echo "CRITICAL findings detected. Review artifact for details."
+              echo "CRITICAL findings detected. Review artifact and Security tab for details."
               cat /tmp/malcontent-output/gate-critical.json
               exit 1
             fi
@@ -483,8 +753,113 @@ jobs:
           echo "      HIGH threshold will also catch steganography, exfil,"
           echo "      and obfuscation patterns that fall below CRITICAL."
 
+      # Convert gate-critical.json (written by the CI gate step above) to
+      # SARIF so CRITICAL findings appear in the Security tab even when the
+      # CI gate trips and the job exits 1.  Runs with 'if: always()'.
+      # Uses the same converter logic as the full-analysis step above.
+      - name: Convert malcontent gate JSON to SARIF
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sarif
+
+          python3 - /tmp/malcontent-output/gate-critical.json /tmp/sarif/malcontent-gate.sarif <<'PYEOF'
+import json, sys, hashlib
+
+src, dst = sys.argv[1], sys.argv[2]
+
+RISK_MAP = {
+    "CRITICAL": ("error",   "9.5"),
+    "HIGH":     ("error",   "7.5"),
+    "MEDIUM":   ("warning", "5.0"),
+    "LOW":      ("note",    "2.0"),
+}
+
+def risk_to_sarif_level(r):
+    return RISK_MAP.get((r or "").upper(), ("note", "1.0"))
+
+def make_sarif(json_path):
+    try:
+        with open(json_path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"  Skipping {json_path}: {e}", file=sys.stderr)
+        return None
+    files_map = data.get("Files") or {}
+    all_b = [b for fr in files_map.values() for b in (fr.get("Behaviors") or [])]
+    seen  = {}
+    for b in all_b:
+        bid = b.get("ID") or b.get("RuleName") or "unknown"
+        if bid not in seen:
+            level, sec = risk_to_sarif_level(b.get("RiskLevel", ""))
+            desc = b.get("Description") or bid
+            ru   = b.get("RuleURL") or b.get("ReferenceURL") or ""
+            seen[bid] = {
+                "id": bid,
+                "name": bid.replace("/","-").replace(".","-"),
+                "shortDescription": {"text": desc[:1024]},
+                "fullDescription":  {"text": desc[:1024]},
+                "defaultConfiguration": {"level": level},
+                "help": {"text": desc[:1024],
+                         "markdown": desc + (f"\n\nRule: [{ru}]({ru})" if ru else "")},
+                "properties": {"tags": ["security","supply-chain"], "precision": "high",
+                               "security-severity": sec,
+                               "problem.severity": "error" if level=="error" else "warning"}
+            }
+    rules      = list(seen.values())
+    rule_index = {r["id"]: i for i, r in enumerate(rules)}
+    results    = []
+    for path, fr in files_map.items():
+        rel = path.removeprefix("/repo/").lstrip("/")
+        for b in (fr.get("Behaviors") or []):
+            bid   = b.get("ID") or b.get("RuleName") or "unknown"
+            level, _ = risk_to_sarif_level(b.get("RiskLevel", ""))
+            desc  = b.get("Description") or bid
+            ms    = b.get("MatchStrings") or []
+            msg   = desc + (" Matched: " + ", ".join(str(m) for m in ms[:5]) if ms else "")
+            fp    = hashlib.sha256(f"{bid}:{rel}".encode()).hexdigest()[:16]
+            results.append({
+                "ruleId": bid, "ruleIndex": rule_index.get(bid, 0),
+                "level": level, "message": {"text": msg[:1024]},
+                "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": rel, "uriBaseId": "%SRCROOT%"},
+                    "region": {"startLine":1,"startColumn":1,"endLine":1,"endColumn":1}
+                }}],
+                "partialFingerprints": {"primaryLocationLineHash": f"{fp}:1"}
+            })
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{"tool": {"driver": {
+            "name": "malcontent", "version": "latest",
+            "informationUri": "https://github.com/chainguard-dev/malcontent",
+            "rules": rules
+        }}, "automationDetails": {"id": "malcontent/"}, "results": results}]
+    }
+
+EMPTY = {
+    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+    "version": "2.1.0",
+    "runs": [{"tool": {"driver": {"name": "malcontent", "rules": []}}, "results": []}]
+}
+sarif = make_sarif(src) or EMPTY
+with open(dst, "w") as f:
+    json.dump(sarif, f, indent=2)
+print(f"  {dst}: {len(sarif['runs'][0]['results'])} result(s)")
+PYEOF
+
+      - name: Upload malcontent SARIF (CI gate) to Security tab
+        if: always()
+        # REPLACE with verified commit SHA — see pinning note at top.
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: /tmp/sarif/malcontent-gate.sarif
+          category: malcontent
+
       # ----------------------------------------------------------------
       # Upload all scan artifacts (always — including on failure)
+      # Includes both raw JSON outputs and the generated SARIF files.
       # ----------------------------------------------------------------
       - name: Upload scan artifacts
         if: always()
@@ -492,6 +867,8 @@ jobs:
         uses: actions/upload-artifact@v4   # pin to SHA in production
         with:
           name: security-scan-results-${{ github.run_id }}
-          path: /tmp/malcontent-output/
+          path: |
+            /tmp/malcontent-output/
+            /tmp/sarif/
           retention-days: 90
           if-no-files-found: warn
