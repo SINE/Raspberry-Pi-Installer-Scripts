@@ -2,11 +2,17 @@
 """
 malcontent JSON -> SARIF 2.1.0 converter.
 
-Usage: malcontent_sarif.py <src.json> <dst.sarif> [automation-id]
+Usage: malcontent_sarif.py <src.json> <dst.sarif> [automation-id [tool-name]]
 
   automation-id  Value written to .runs[].automationDetails.id.
                  Defaults to "malcontent/" when omitted.
                  Must be unique per upload-sarif call within the same job.
+
+  tool-name      Value written to tool.driver.name.
+                 Defaults to "malcontent" when omitted.
+                 Use a distinct name (e.g. "malcontent-gate") for auxiliary
+                 uploads so GitHub does not reconcile them against the primary
+                 scan's alert set and auto-close open alerts.
 
 Understands the FileReport / Behavior schema from malcontent
 (pkg/malcontent/malcontent.go):
@@ -26,6 +32,7 @@ import json, sys
 
 src, dst = sys.argv[1], sys.argv[2]
 automation_id = sys.argv[3] if len(sys.argv) > 3 else "malcontent/"
+tool_name     = sys.argv[4] if len(sys.argv) > 4 else "malcontent"
 
 RISK_MAP = {
     "CRITICAL": ("error",   "9.5"),
@@ -96,7 +103,7 @@ def make_sarif(json_path):
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [{"tool": {"driver": {
-            "name": "malcontent", "version": "latest",
+            "name": tool_name, "version": "latest",
             "informationUri": "https://github.com/chainguard-dev/malcontent",
             "rules": rules
         }}, "automationDetails": {"id": automation_id}, "results": results}]
@@ -105,7 +112,7 @@ def make_sarif(json_path):
 EMPTY_SARIF = {
     "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
     "version": "2.1.0",
-    "runs": [{"tool": {"driver": {"name": "malcontent", "rules": []}}, "results": []}]
+    "runs": [{"tool": {"driver": {"name": tool_name, "rules": []}}, "results": []}]
 }
 sarif = make_sarif(src) or EMPTY_SARIF
 with open(dst, "w") as f:

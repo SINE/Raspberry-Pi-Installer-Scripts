@@ -871,7 +871,8 @@ jobs:
           python3 .github/scripts/malcontent_sarif.py \
             /tmp/malcontent-output/gate-critical.json \
             /tmp/sarif/malcontent-gate.sarif \
-            malcontent/gate
+            malcontent/gate \
+            malcontent-gate
 
       - name: Upload malcontent SARIF (CI gate) to Security tab
         if: always()
