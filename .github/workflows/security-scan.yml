@@ -11,8 +11,11 @@
 # Stages covered:
 #   Stage 0: Ecosystem triage (bash, no external tools)
 #   Stage 1: Unicode BiDi / Trojan Source detection (grep)
+#   Stage 0: Ecosystem triage (bash, no external tools)
+#   Stage 1: Unicode BiDi / Trojan Source detection (grep)
 #   Stage 2a: Python dep inference via pipreqs (when no manifest exists)
 #   Stage 2b: OSV-Scanner — CVE matching on lockfiles/manifests
+#   Stage 2c: pip-audit — CVE matching via PyPI Advisory Database
 #   Stage 3+: malcontent — full behavioral scan (14,500+ YARA rules)
 #
 # GitHub Security tab integration:
@@ -25,6 +28,7 @@
 #   Tools → Security tab categories:
 #     trojan-source  — Stage 1 BiDi/Trojan-Source findings
 #     osv-scanner    — Stage 2b CVE findings from OSV-Scanner
+#     pip-audit      — Stage 2c CVE findings from pip-audit (PyPI Advisory DB)
 #     malcontent     — Stage 3 behavioral findings from malcontent
 #
 # Action SHA pinning:
@@ -370,6 +374,99 @@ jobs:
         with:
           sarif_file: /tmp/sarif/osv-scanner.sarif
           category: osv-scanner
+
+      # ----------------------------------------------------------------
+      # STAGE 2c — pip-audit: CVE matching via PyPI Advisory Database
+      #
+      # pip-audit is the official PyPA vulnerability scanner. It queries
+      # the PyPI Advisory Database (which is itself backed by OSV) and
+      # provides a complementary second opinion to OSV-Scanner with
+      # pip-native version resolution.
+      #
+      # Design constraints respected:
+      #   - The repo is mounted :ro — no repo code is executed.
+      #   - pip-audit resolves package versions via pip's resolver but
+      #     does not install packages into any runtime environment.
+      #   - --no-deps limits the audit to explicitly listed packages
+      #     only (requirements.txt already enumerates everything).
+      #   - Network is required: pip-audit must reach PyPI to resolve
+      #     version ranges (e.g., Pillow>=12.2.0) and query the
+      #     advisory database. This is equivalent to OSV-Scanner's
+      #     network usage and does not touch repo files.
+      #
+      # Packages audited (mirrors requirements.txt):
+      #   [A] Script-runner:  adafruit-python-shell, click
+      #   [B] Runtime pip:    adafruit-blinka,
+      #                       adafruit-circuitpython-rgb-display, spidev
+      #   [C] Runtime apt:    Pillow>=12.2.0, numpy
+      #
+      # Two output passes:
+      #   1. --format sarif  → /tmp/sarif/pip-audit.sarif (Security tab)
+      #   2. --format columns → terminal (human-readable log)
+      #
+      # Exit code 1 from pip-audit means vulnerabilities were found.
+      # Both passes use '|| true' so findings are informational and do
+      # not block CI. Remove '|| true' to enforce a hard gate.
+      # ----------------------------------------------------------------
+      - name: pip-audit — Python dependency CVE check
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sarif
+
+          # Packages being audited (explicit list mirrors requirements.txt):
+          #   adafruit-python-shell  click
+          #   adafruit-blinka  adafruit-circuitpython-rgb-display  spidev
+          #   Pillow>=12.2.0  numpy
+          echo "=== pip-audit: Python dependency CVE scan ==="
+          echo "    Source: requirements.txt"
+          echo "    Packages: adafruit-python-shell click adafruit-blinka"
+          echo "              adafruit-circuitpython-rgb-display spidev"
+          echo "              Pillow>=12.2.0 numpy"
+
+          # Pass 1: SARIF output for Security tab.
+          # pip-audit is installed inside the container, not from the repo.
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo:ro" \
+            python:3.12-slim \
+            sh -c "
+              pip install 'pip-audit==2.9.0' \
+                  --quiet \
+                  --no-cache-dir \
+                  --index-url https://pypi.org/simple/ && \
+              pip-audit \
+                --requirement /repo/requirements.txt \
+                --format sarif \
+                --no-deps \
+                --skip-editable" \
+          > /tmp/sarif/pip-audit.sarif || true
+          # '|| true': exit code 1 = vulns found; SARIF is still written
+          # and will be uploaded to the Security tab.
+
+          # Pass 2: human-readable table summary (terminal log).
+          echo ""
+          echo "=== pip-audit: table summary ==="
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo:ro" \
+            python:3.12-slim \
+            sh -c "
+              pip install 'pip-audit==2.9.0' \
+                  --quiet \
+                  --no-cache-dir \
+                  --index-url https://pypi.org/simple/ && \
+              pip-audit \
+                --requirement /repo/requirements.txt \
+                --no-deps \
+                --skip-editable" \
+          || true
+
+      - name: Upload pip-audit SARIF to Security tab
+        if: always()
+        # REPLACE with verified commit SHA — see pinning note at top.
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: /tmp/sarif/pip-audit.sarif
+          category: pip-audit
 
       # ----------------------------------------------------------------
       # STAGE 3 — malcontent: full behavioral analysis
