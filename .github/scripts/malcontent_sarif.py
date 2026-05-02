@@ -22,7 +22,7 @@ RiskLevel -> SARIF level:
   MEDIUM   -> warning (security-severity 5.0)
   LOW      -> note    (security-severity 2.0)
 """
-import json, sys, hashlib
+import json, sys
 
 src, dst = sys.argv[1], sys.argv[2]
 automation_id = sys.argv[3] if len(sys.argv) > 3 else "malcontent/"
@@ -82,7 +82,6 @@ def make_sarif(json_path):
             desc  = b.get("Description") or bid
             matches = b.get("MatchStrings") or []
             msg_text = desc + (" Matched: " + ", ".join(str(m) for m in matches[:5]) if matches else "")
-            fp = hashlib.sha256(f"{bid}:{rel}".encode()).hexdigest()[:16]
             results.append({
                 "ruleId":    bid,
                 "ruleIndex": rule_index.get(bid, 0),
@@ -91,8 +90,7 @@ def make_sarif(json_path):
                 "locations": [{"physicalLocation": {
                     "artifactLocation": {"uri": rel, "uriBaseId": "%SRCROOT%"},
                     "region": {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1}
-                }}],
-                "partialFingerprints": {"primaryLocationLineHash": f"{fp}:1"}
+                }}]
             })
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
