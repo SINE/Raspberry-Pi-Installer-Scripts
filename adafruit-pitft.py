@@ -989,7 +989,7 @@ restart the script and choose a different orientation.""".format(rotation=pitftr
     if shell.grep("boot", "/proc/mounts"):
         print("/boot is mounted")
     else:
-        print("/boot must be mounted. if you think it's not, quit here and try: sudo mount /dev/mmcblk0p1 /boot")
+        print("/boot must be mounted. if you think it's not, quit here and try: sudo mount /dev/ (f.e. mmcblk0p1) /boot")
         if shell.prompt("Continue?"):
             print("Proceeding.")
         else:
