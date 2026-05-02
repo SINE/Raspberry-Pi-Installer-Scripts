@@ -51,7 +51,7 @@
 #   Shown:
 #     actions/checkout            v4.2.2  = 11bd71901bbe5b1630ceea73d27597364c9af683
 #     actions/upload-artifact     v4      = (verify at releases page before using)
-#     github/codeql-action/upload-sarif v3 = (verify at releases page before using)
+#     github/codeql-action/upload-sarif v4 = (verify at releases page before using)
 
 name: Repository Security Scan
 
@@ -354,7 +354,7 @@ jobs:
       - name: Upload Trojan Source SARIF to Security tab
         if: always()
         # REPLACE with verified commit SHA — see pinning note at top.
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: /tmp/sarif/trojan-source.sarif
           category: trojan-source
@@ -497,7 +497,7 @@ jobs:
       - name: Upload OSV-Scanner SARIF to Security tab
         if: always()
         # REPLACE with verified commit SHA — see pinning note at top.
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: /tmp/sarif/osv-scanner.sarif
           category: osv-scanner
@@ -612,7 +612,7 @@ jobs:
       - name: Upload pip-audit SARIF to Security tab
         if: always()
         # REPLACE with verified commit SHA — see pinning note at top.
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: /tmp/sarif/pip-audit.sarif
           category: pip-audit
@@ -772,7 +772,7 @@ jobs:
       - name: Upload malcontent SARIF (full analysis) to Security tab
         if: always()
         # REPLACE with verified commit SHA — see pinning note at top.
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: /tmp/sarif/malcontent-full.sarif
           category: malcontent
@@ -876,7 +876,7 @@ jobs:
       - name: Upload malcontent SARIF (CI gate) to Security tab
         if: always()
         # REPLACE with verified commit SHA — see pinning note at top.
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: /tmp/sarif/malcontent-gate.sarif
           category: malcontent-gate  # distinct from 'malcontent' (full analysis)
