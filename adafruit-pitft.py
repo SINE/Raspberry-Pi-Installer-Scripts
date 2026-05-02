@@ -23,6 +23,8 @@ shell.group = 'PITFT'
 
 __version__ = "4.0.0"
 
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+
 """
 This is the main configuration. Displays should be placed in the order
 they are to appear in the menu.
@@ -512,6 +514,14 @@ def update_udev():
     return True
 
 def compile_mipi_fw():
+    mipi_dir = os.path.join(SCRIPT_DIR, "mipi")
+    mipi_cmd = os.path.join(mipi_dir, "mipi-dbi-cmd")
+
+    if not shell.exists(mipi_cmd):
+        shell.bail(f"Expected mipi helper at {mipi_cmd} but it was not found")
+
+    shell.chmod(mipi_cmd, "+x")
+
     command_src = "mipi/panel.txt"
 
     # We could just copy the file to panel.txt, edit that, then remove it after
@@ -521,12 +531,8 @@ def compile_mipi_fw():
     shell.pattern_replace(command_src, "^#*(.*?# rotation.*?$)", "#\\1")
     # Uncomment the one for the rotation we are going for
     shell.pattern_replace(command_src, "^#(.*?# rotation " + pitftrot + ".*?$)", "\\1")
-    # Download the mipi-dbi-cmd script if it doesn't exist
-    if not shell.exists("mipi-dbi-cmd"):
-        shell.run_command("wget https://raw.githubusercontent.com/notro/panel-mipi-dbi/main/mipi-dbi-cmd")
-        shell.run_command("chmod +x mipi-dbi-cmd")
     # Run the mipi-dbi-script and output directly to the /lib/firmware folder
-    shell.run_command(f"./mipi-dbi-cmd /lib/firmware/{mipi_data['command_bin']}.bin mipi/panel.txt")
+    shell.run_command(f"{mipi_cmd} /lib/firmware/{mipi_data['command_bin']}.bin mipi/panel.txt")
     shell.remove(command_src)
     return True
 
@@ -604,26 +610,24 @@ def install_mirror():
     print("Installing cmake...")
     if not shell.run_command("apt-get --yes --allow-downgrades --allow-remove-essential --allow-change-held-packages install cmake", suppress_message=True):
         warn_exit("Apt failed to install software!")
-    print("Downloading rpi-fbcp...")
-    shell.pushd("/tmp")
-    shell.run_command("curl -sLO https://github.com/adafruit/rpi-fbcp/archive/master.zip")
-    print("Uncompressing rpi-fbcp...")
-    shell.run_command("rm -rf /tmp/rpi-fbcp-master")
-    if not shell.run_command("unzip master.zip", suppress_message=True):
-        warn_exit("Failed to uncompress fbcp!")
-    shell.chdir("rpi-fbcp-master")
-    shell.run_command("mkdir build")
-    shell.chdir("build")
+    fbcp_src = os.path.join(SCRIPT_DIR, "rpi-fbcp")
+    fbcp_build = "/tmp/rpi-fbcp-build"
+    if not shell.isdir(fbcp_src):
+        shell.bail(f"Expected rpi-fbcp source at {fbcp_src} but it was not found")
+
+    print(f"Using local rpi-fbcp source: {fbcp_src}")
+    shell.run_command(f"rm -rf {fbcp_build}")
+    shell.run_command(f"mkdir -p {fbcp_build}")
+    shell.chdir(fbcp_build)
     print("Building rpi-fbcp...")
-    shell.write_text_file("../CMakeLists.txt", "\nset (CMAKE_C_FLAGS \"-std=gnu99 ${CMAKE_C_FLAGS}\")")
-    if not shell.run_command("cmake ..", suppress_message=True):
+    cmake_cmd = f'cmake -DCMAKE_C_FLAGS="-std=gnu99 ${{CMAKE_C_FLAGS}}" "{fbcp_src}"'
+    if not shell.run_command(cmake_cmd, suppress_message=True):
         warn_exit("Failed to cmake fbcp!")
     if not shell.run_command("make", suppress_message=True):
         warn_exit("Failed to make fbcp!")
     print("Installing rpi-fbcp...")
     shell.run_command("install fbcp /usr/local/bin/fbcp")
-    shell.popd()
-    shell.run_command("rm -rf /tmp/rpi-fbcp-master")
+    shell.run_command(f"rm -rf {fbcp_build}")
 
     if "mirror_rotations" in pitft_config:
         mirror_rotations = pitft_config['mirror_rotations']
@@ -710,7 +714,7 @@ scale = {scale}
 
     elif manager == "labwc":
         ### LABWC (Using Kanshi) ###
-        # See https://man.archlinux.org/man/kanshi.5.en for more information on kanshi config files
+        # See man.archlinux.org/man/kanshi.5.en for more information on kanshi config files
         labwc_config = f"{target_homedir}/.config/kanshi/config"
 
         # If the config file doesn't exist or doesn't contain profile, enumerate the devices and create a new profile
