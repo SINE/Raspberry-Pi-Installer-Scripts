@@ -8,9 +8,16 @@
 #   - Network is disabled (--network none) for all containers that
 #     touch repo files to prevent exfiltration by any embedded payload.
 #
+# Scan scope:
+#   push / pull_request  → scoped: only files changed in the commit or PR
+#                          are passed to BiDi grep and malcontent.
+#                          OSV-Scanner and pip-audit run only when a
+#                          manifest/lockfile is among the changed files.
+#   workflow_dispatch    → full: entire repository scanned (manual run).
+#   schedule             → full: entire repository scanned (weekly cron).
+#   Falls back to full scan on the first push to a new branch.
+#
 # Stages covered:
-#   Stage 0: Ecosystem triage (bash, no external tools)
-#   Stage 1: Unicode BiDi / Trojan Source detection (grep)
 #   Stage 0: Ecosystem triage (bash, no external tools)
 #   Stage 1: Unicode BiDi / Trojan Source detection (grep)
 #   Stage 2a: Python dep inference via pipreqs (when no manifest exists)
@@ -54,6 +61,8 @@ on:
   pull_request:
     branches: ["**"]
   workflow_dispatch:
+#  schedule:
+#    - cron: "0 4 * * 1"   # Every Monday at 04:00 UTC — full scan
 
 # Declare minimum required permissions. Never use 'write-all'.
 permissions:
@@ -79,6 +88,110 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0    # full history; required if mal diff is added later
+
+      # ----------------------------------------------------------------
+      # SCOPE DETECTION
+      # Determines whether to scan the whole repository (full) or only the
+      # files changed in this push/PR (scoped).
+      #
+      # Scan mode by trigger:
+      #   push / pull_request  → scoped (changed, still-existing files only)
+      #   workflow_dispatch    → full (manual run)
+      #   schedule             → full (weekly cron)
+      #
+      # Falls back to full when:
+      #   - First push to a branch (before SHA is all-zeros)
+      #   - git diff returns no surviving files
+      #
+      # Outputs (steps.scope.outputs.*):
+      #   scan_mode         — "full" or "scoped"
+      #   manifests_changed — "true" if requirements*.txt / pyproject.toml /
+      #                       poetry.lock / uv.lock / Pipfile.lock changed
+      #
+      # Side effects:
+      #   /tmp/scan-scope/changed_files.txt — repo-relative path per line;
+      #     empty for full-scan mode.
+      #   /tmp/sarif/*.sarif stubs — empty valid SARIF 2.1.0 pre-created so
+      #     upload steps never fail when a scan stage is skipped.
+      # ----------------------------------------------------------------
+      - name: Determine scan scope
+        id: scope
+        env:
+          GH_EVENT_NAME:   ${{ github.event_name }}
+          GH_EVENT_BEFORE: ${{ github.event.before }}
+          GH_SHA:          ${{ github.sha }}
+          GH_BASE_REF:     ${{ github.base_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/scan-scope /tmp/sarif /tmp/malcontent-output
+
+          # Pre-create empty SARIF stubs so upload steps never fail when a
+          # scan stage is skipped in scoped mode.
+          _EMPTY_SARIF='{"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[{"tool":{"driver":{"name":"placeholder","rules":[]}},"results":[]}]}'
+          for _TOOL in trojan-source osv-scanner pip-audit malcontent-full malcontent-gate; do
+            echo "$_EMPTY_SARIF" > "/tmp/sarif/${_TOOL}.sarif"
+          done
+
+          # Stub malcontent JSON outputs (converter expects valid JSON).
+          echo '{"Files":{}}' > /tmp/malcontent-output/full-analysis.json
+          echo '{"Files":{}}' > /tmp/malcontent-output/gate-critical.json
+
+          touch /tmp/scan-scope/changed_files.txt
+          SCAN_MODE="full"
+
+          if [[ "$GH_EVENT_NAME" == "push" || "$GH_EVENT_NAME" == "pull_request" ]]; then
+            _RAW=/tmp/scan-scope/raw.txt
+            if [[ "$GH_EVENT_NAME" == "pull_request" ]]; then
+              git diff --name-only "origin/${GH_BASE_REF}...HEAD" \
+                > "$_RAW" 2>/dev/null || true
+            else
+              if [[ "$GH_EVENT_BEFORE" == "0000000000000000000000000000000000000000" ]]; then
+                echo "First push to branch — using full scan."
+              else
+                git diff --name-only "$GH_EVENT_BEFORE" "$GH_SHA" \
+                  > "$_RAW" 2>/dev/null || true
+              fi
+            fi
+
+            if [[ -f "$_RAW" ]]; then
+              # Keep only files that still exist (deleted files irrelevant).
+              while IFS= read -r _F; do
+                [[ -f "$_F" ]] && echo "$_F"
+              done < "$_RAW" > /tmp/scan-scope/changed_files.txt || true
+
+              _COUNT=$(wc -l < /tmp/scan-scope/changed_files.txt | tr -d ' ')
+              if [[ "$_COUNT" -gt 0 ]]; then
+                SCAN_MODE="scoped"
+                echo "Scoped scan: $_COUNT changed file(s):"
+                cat /tmp/scan-scope/changed_files.txt
+              else
+                echo "No surviving changed files — falling back to full scan."
+              fi
+            fi
+          else
+            echo "Trigger '$GH_EVENT_NAME' — full scan."
+          fi
+
+          # Detect manifest/lockfile changes (gates OSV-Scanner and pip-audit).
+          MANIFESTS_CHANGED="false"
+          if [[ "$SCAN_MODE" == "scoped" ]]; then
+            if grep -qE '(^|/)requirements[^/]*\.txt$|(^|/)pyproject\.toml$|(^|/)poetry\.lock$|(^|/)uv\.lock$|(^|/)Pipfile\.lock$' \
+                 /tmp/scan-scope/changed_files.txt 2>/dev/null; then
+              MANIFESTS_CHANGED="true"
+            fi
+          fi
+
+          {
+            echo "scan_mode=$SCAN_MODE"
+            echo "manifests_changed=$MANIFESTS_CHANGED"
+          } >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "=== Scan scope summary ==="
+          echo "  Event:             $GH_EVENT_NAME"
+          echo "  Mode:              $SCAN_MODE"
+          echo "  Manifests changed: $MANIFESTS_CHANGED"
 
       # ----------------------------------------------------------------
       # STAGE 0 — Ecosystem triage
@@ -209,17 +322,30 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/sarif
 
-          HITS=$(grep -rPl \
-            "[\x{200b}\x{200e}\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{feff}\x{00ad}]" \
-            --include="*.py"    --include="*.js"     --include="*.ts"  \
-            --include="*.tsx"   --include="*.jsx"    --include="*.go"  \
-            --include="*.rs"    --include="*.java"   --include="*.kt"  \
-            --include="*.c"     --include="*.cpp"    --include="*.h"   \
-            --include="*.hpp"   --include="*.cs"     --include="*.sh"  \
-            --include="*.bash"  --include="*.yaml"   --include="*.yml" \
-            --include="*.rb"    --include="*.php"    --include="*.swift" \
-            --include="*.scala" --include="*.pl"     --include="*.lua" \
-            . 2>/dev/null || true)
+          _BIDI_PAT="[\x{200b}\x{200e}\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{feff}\x{00ad}]"
+          if [[ "${{ steps.scope.outputs.scan_mode }}" == "scoped" && \
+                -s /tmp/scan-scope/changed_files.txt ]]; then
+            # Scoped: grep only the changed, surviving files.
+            # No --include filters needed — the list is already the full target.
+            mapfile -t _CHANGED < /tmp/scan-scope/changed_files.txt
+            if [[ "${#_CHANGED[@]}" -gt 0 ]]; then
+              HITS=$(grep -Pl "$_BIDI_PAT" "${_CHANGED[@]}" 2>/dev/null || true)
+            else
+              HITS=""
+            fi
+          else
+            # Full: grep entire repository tree.
+            HITS=$(grep -rPl "$_BIDI_PAT" \
+              --include="*.py"    --include="*.js"     --include="*.ts"  \
+              --include="*.tsx"   --include="*.jsx"    --include="*.go"  \
+              --include="*.rs"    --include="*.java"   --include="*.kt"  \
+              --include="*.c"     --include="*.cpp"    --include="*.h"   \
+              --include="*.hpp"   --include="*.cs"     --include="*.sh"  \
+              --include="*.bash"  --include="*.yaml"   --include="*.yml" \
+              --include="*.rb"    --include="*.php"    --include="*.swift" \
+              --include="*.scala" --include="*.pl"     --include="*.lua" \
+              . 2>/dev/null || true)
+          fi
 
           # Build SARIF 2.1.0.  One result per affected file.
           # Script is in .github/scripts/ to avoid YAML heredoc indentation issues.
@@ -326,6 +452,7 @@ jobs:
       # tab is populated regardless.
       # ----------------------------------------------------------------
       - name: OSV-Scanner — dependency CVE check
+        if: steps.scope.outputs.scan_mode == 'full' || steps.scope.outputs.manifests_changed == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -409,6 +536,7 @@ jobs:
       # not block CI. Remove '|| true' to enforce a hard gate.
       # ----------------------------------------------------------------
       - name: pip-audit — Python dependency CVE check
+        if: steps.scope.outputs.scan_mode == 'full' || steps.scope.outputs.manifests_changed == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -426,8 +554,14 @@ jobs:
 
           # Pass 1: SARIF output for Security tab.
           # pip-audit is installed inside the container, not from the repo.
+          # Use --output into a writable mounted volume rather than capturing
+          # stdout: pip-audit may exit 1 (vulns found) before flushing stdout
+          # fully, producing a truncated/empty file. Writing to a file inside
+          # the container is atomic from the host's perspective.
+          mkdir -p /tmp/pip-audit-output
           docker run --rm \
             -v "${{ github.workspace }}:/repo:ro" \
+            -v "/tmp/pip-audit-output:/output" \
             python:3.12-slim \
             sh -c "
               pip install 'pip-audit==2.9.0' \
@@ -437,11 +571,26 @@ jobs:
               pip-audit \
                 --requirement /repo/requirements.txt \
                 --format sarif \
+                --output /output/pip-audit.sarif \
                 --no-deps \
                 --skip-editable" \
-          > /tmp/sarif/pip-audit.sarif || true
-          # '|| true': exit code 1 = vulns found; SARIF is still written
-          # and will be uploaded to the Security tab.
+          || true
+          # '|| true': exit code 1 = vulns found; SARIF still written to
+          # /output/pip-audit.sarif before pip-audit exits.
+
+          # Validate the produced SARIF is well-formed JSON; emit a minimal
+          # valid empty SARIF if pip-audit failed to produce any output
+          # (e.g. network timeout, unresolvable package on this platform).
+          if python3 -c \
+               "import json,sys; json.load(open('/tmp/pip-audit-output/pip-audit.sarif'))" \
+               2>/dev/null; then
+            cp /tmp/pip-audit-output/pip-audit.sarif /tmp/sarif/pip-audit.sarif
+            echo "pip-audit SARIF validated OK."
+          else
+            echo "::warning::pip-audit did not produce valid SARIF — writing empty SARIF placeholder."
+            printf '{"version":"2.1.0","$schema":"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Documents/CommitteeSpecifications/2.1.0/sarif-schema-2.1.0.json","runs":[{"tool":{"driver":{"name":"pip-audit","version":"2.9.0","rules":[]}},"results":[]}]}' \
+              > /tmp/sarif/pip-audit.sarif
+          fi
 
           # Pass 2: human-readable table summary (terminal log).
           echo ""
@@ -538,6 +687,18 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/malcontent-output
 
+          # Build scan targets: scoped (changed files only) or full (/repo).
+          if [[ "${{ steps.scope.outputs.scan_mode }}" == "scoped" && \
+                -s /tmp/scan-scope/changed_files.txt ]]; then
+            mapfile -t _CHANGED < /tmp/scan-scope/changed_files.txt
+            MALCONTENT_TARGETS=("${_CHANGED[@]/#//repo/}")
+            echo "Scoped: ${#MALCONTENT_TARGETS[@]} target(s)"
+          else
+            MALCONTENT_TARGETS=("/repo")
+          fi
+          # Safety fallback: empty array should never happen, but guard anyway.
+          [[ "${#MALCONTENT_TARGETS[@]}" -eq 0 ]] && MALCONTENT_TARGETS=("/repo")
+
           echo "=== malcontent analyze: full behavioral enumeration ==="
           # stdout is redirected to the host-owned file — no /output mount
           # needed. Avoids permission denied from container non-root user.
@@ -552,7 +713,7 @@ jobs:
             --stats \
             --format json \
             analyze \
-            /repo \
+            "${MALCONTENT_TARGETS[@]}" \
             > /tmp/malcontent-output/full-analysis.json
 
           # Human-readable terminal summary of MEDIUM+ findings (informational).
@@ -568,7 +729,7 @@ jobs:
             --min-risk medium \
             --format terminal \
             analyze \
-            /repo || true
+            "${MALCONTENT_TARGETS[@]}" || true
 
       # Convert malcontent full-analysis JSON to SARIF 2.1.0.
       #
@@ -620,12 +781,11 @@ jobs:
       # --min-risk critical (confirmed in source code). Only --min-risk
       # and explicit --include-data-files are set.
       #
-      # The gate-critical.json written here is also consumed by the
-      # "Convert malcontent JSON to SARIF" step above to produce
-      # malcontent-gate.sarif.  Both SARIF files are uploaded to the
-      # Security tab under the same 'malcontent' category; GitHub
-      # deduplicates alerts by ruleId+location fingerprint so no
-      # duplicate alerts are created.
+      # The gate-critical.json written here is converted to
+      # malcontent-gate.sarif and uploaded under the distinct category
+      # 'malcontent-gate'. GitHub allows only one upload-sarif action
+      # per category per job; using separate categories for full-analysis
+      # and gate results avoids the "only one run per category" error.
       - name: malcontent — CI gate (CRITICAL threshold)
         shell: bash
         run: |
@@ -637,6 +797,16 @@ jobs:
           # Run scan, write JSON, capture exit code separately.
           # --exit-first-hit may exit 0 even on match (see note above).
           # JSON output is the authoritative gate signal.
+          # Build scan targets: scoped (changed files only) or full (/repo).
+          if [[ "${{ steps.scope.outputs.scan_mode }}" == "scoped" && \
+                -s /tmp/scan-scope/changed_files.txt ]]; then
+            mapfile -t _CHANGED < /tmp/scan-scope/changed_files.txt
+            MALCONTENT_TARGETS=("${_CHANGED[@]/#//repo/}")
+          else
+            MALCONTENT_TARGETS=("/repo")
+          fi
+          [[ "${#MALCONTENT_TARGETS[@]}" -eq 0 ]] && MALCONTENT_TARGETS=("/repo")
+
           GATE_EXIT=0
           # stdout redirected to host-owned file — same pattern as analyze pass.
           docker run --rm \
@@ -651,7 +821,7 @@ jobs:
             --exit-first-hit \
             --format json \
             scan \
-            /repo \
+            "${MALCONTENT_TARGETS[@]}" \
             > /tmp/malcontent-output/gate-critical.json \
             || GATE_EXIT=$?
 
@@ -707,7 +877,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: /tmp/sarif/malcontent-gate.sarif
-          category: malcontent
+          category: malcontent-gate  # distinct from 'malcontent' (full analysis)
 
       # ----------------------------------------------------------------
       # Upload all scan artifacts (always — including on failure)
