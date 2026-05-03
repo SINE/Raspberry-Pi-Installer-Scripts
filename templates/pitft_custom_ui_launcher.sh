@@ -128,7 +128,6 @@ else
 fi
 
 log "Using framebuffer: $fbdev"
-export SDL_VIDEODRIVER="fbcon"
 export SDL_FBDEV="$fbdev"
 export SDL_AUDIODRIVER="dummy"
 

@@ -3,6 +3,7 @@
 
 import atexit
 import os
+import sys
 
 import pygame
 from PIL import Image, ImageSequence
@@ -18,6 +19,49 @@ TICKER_FG = (255, 220, 0)
 
 ASSET_PATH = os.environ.get("PITFT_IMAGE", "")
 TICKER_TEXT = os.environ.get("PITFT_TICKER", "PiTFT custom UI service running")
+
+
+def _restore_env(key, value):
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
+
+
+def init_display_with_fallback(size):
+    """Try SDL video backends conservatively, preferring user/env choice first."""
+    previous_driver = os.environ.get("SDL_VIDEODRIVER")
+    tried = []
+
+    # Order: explicit env -> auto (unset) -> kmsdrm -> fbcon -> directfb.
+    candidates = [previous_driver, "", "kmsdrm", "fbcon", "directfb"]
+
+    for candidate in candidates:
+        try:
+            if candidate is None:
+                continue
+
+            if candidate == "":
+                os.environ.pop("SDL_VIDEODRIVER", None)
+                candidate_label = "auto"
+            else:
+                os.environ["SDL_VIDEODRIVER"] = candidate
+                candidate_label = candidate
+
+            pygame.display.quit()
+            pygame.display.init()
+            screen = pygame.display.set_mode(size, pygame.FULLSCREEN)
+            active = pygame.display.get_driver()
+            print(f"[pitft-ui] SDL video driver active: {active} (requested {candidate_label})")
+            return screen
+        except pygame.error as exc:
+            tried.append(f"{candidate_label}: {exc}")
+
+    _restore_env("SDL_VIDEODRIVER", previous_driver)
+    print("[pitft-ui] Failed to initialize display with available SDL drivers", file=sys.stderr)
+    for msg in tried:
+        print(f"[pitft-ui] {msg}", file=sys.stderr)
+    raise RuntimeError("No usable SDL video backend found")
 
 
 def load_frames(path, size):
@@ -47,7 +91,7 @@ def main():
     pygame.init()
     atexit.register(pygame.quit)
 
-    screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
+    screen = init_display_with_fallback((WIDTH, HEIGHT))
     pygame.mouse.set_visible(False)
     clock = pygame.time.Clock()
 
