@@ -702,6 +702,7 @@ def update_wayland_settings():
 
     if manager == "wayfire":
         ### WAYFIRE ###
+        shell.run_command(f"mkdir -p {target_homedir}/.config")
         wayfire_config = f"{target_homedir}/.config/wayfire.ini"
         # Remove any existing settings previously added by this script
         shell.pattern_replace(wayfire_config, '\n# --- added by adafruit-pitft-helper.*?\n# --- end adafruit-pitft-helper.*?\n', multi_line=True)
@@ -715,6 +716,7 @@ scale = {scale}
     elif manager == "labwc":
         ### LABWC (Using Kanshi) ###
         # See man.archlinux.org/man/kanshi.5.en for more information on kanshi config files
+        shell.run_command(f"mkdir -p {target_homedir}/.config/kanshi")
         labwc_config = f"{target_homedir}/.config/kanshi/config"
 
         # If the config file doesn't exist or doesn't contain profile, enumerate the devices and create a new profile
@@ -970,7 +972,7 @@ restart the script and choose a different orientation.""".format(rotation=pitftr
         # Show a selection menu for install_types using shell.select_n and setting the selection to the key of install_types
         install_selection = shell.select_n("Select install type:", install_types.values())
         install_type = list(install_types.keys())[install_selection - 1]
-    update_wayland_settings()
+
     if REMOVE_KERNEL_PINNING:
         # Checking if kernel is pinned
         if shell.exists('/etc/apt/preferences.d/99-adafruit-pin-kernel'):
