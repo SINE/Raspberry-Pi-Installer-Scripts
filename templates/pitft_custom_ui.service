@@ -1,0 +1,20 @@
+[Unit]
+Description=Custom PiTFT UI Service (__SERVICE_NAME__)
+After=con2fbmap.service multi-user.target
+Requires=con2fbmap.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__APP_DIR__
+ExecStart=__RUNNER_PATH__
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=10
+ExecStopPost=-/bin/systemctl restart con2fbmap.service
+
+[Install]
+WantedBy=multi-user.target
